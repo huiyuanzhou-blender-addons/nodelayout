@@ -19,17 +19,111 @@ def _get_to_socket_index(node: bpy.types.Node, node_socket: bpy.types.NodeSocket
     assert False
 
 
-# Note: "dimensions" and "height" may not be correct depending on the situation
-def _get_height(node: bpy.types.Node) -> float:
+def _get_node_size(node: bpy.types.Node) -> tuple[float, float]:
+    """Return node size, including when dimensions are unavailable."""
     epsilon = 1e-05
+    width = node.dimensions.x if node.dimensions.x > epsilon else node.width
+    height = node.dimensions.y if node.dimensions.y > epsilon else node.height
+    return max(width, epsilon), max(height, epsilon)
 
-    if node.dimensions.y > epsilon:
-        # Note: node.dimensions.y seems to store twice the value of node.height
-        return node.dimensions.y / 2.0
-    elif math.fabs(node.height - 100.0) > epsilon:
-        return node.height
-    else:
-        return 200.0
+
+def _resolve_overlaps(
+        node_tree: bpy.types.NodeTree,
+        target_nodes: List[bpy.types.Node],
+        target_space: float,
+        max_num_iters: int,
+) -> int:
+    """Resolve intersections with exact separation steps until stable."""
+    target_set = set(target_nodes)
+    nodes = list(node_tree.nodes)
+    margin = max(0.0, target_space)
+    max_passes = max(1, min(max_num_iters, 2000))
+
+    for pass_index in range(max_passes):
+        moved = False
+        for index, node_1 in enumerate(nodes):
+            width_1, height_1 = _get_node_size(node_1)
+            for node_2 in nodes[index + 1:]:
+                if node_1 not in target_set and node_2 not in target_set:
+                    continue
+
+                width_2, height_2 = _get_node_size(node_2)
+                x_1, y_1 = node_1.location
+                x_2, y_2 = node_2.location
+                overlap_x = min(x_1 + width_1, x_2 + width_2) - max(x_1, x_2) + margin
+                overlap_y = min(y_1, y_2) - max(y_1 - height_1, y_2 - height_2) + margin
+                if overlap_x <= 0.0 or overlap_y <= 0.0:
+                    continue
+
+                center_x_1 = x_1 + width_1 * 0.5
+                center_x_2 = x_2 + width_2 * 0.5
+                center_y_1 = y_1 - height_1 * 0.5
+                center_y_2 = y_2 - height_2 * 0.5
+                move_horizontal = overlap_x <= overlap_y
+                direction = (1.0 if center_x_1 >= center_x_2 else -1.0) if move_horizontal else (1.0 if center_y_1 >= center_y_2 else -1.0)
+                displacement = overlap_x if move_horizontal else overlap_y
+                movable_1 = node_1 in target_set
+                movable_2 = node_2 in target_set
+                if movable_1 and movable_2:
+                    displacement_1 = displacement * 0.5
+                    displacement_2 = displacement * 0.5
+                elif movable_1:
+                    displacement_1 = displacement
+                    displacement_2 = 0.0
+                else:
+                    displacement_1 = 0.0
+                    displacement_2 = displacement
+
+                if move_horizontal:
+                    node_1.location[0] += direction * displacement_1
+                    node_2.location[0] -= direction * displacement_2
+                else:
+                    node_1.location[1] += direction * displacement_1
+                    node_2.location[1] -= direction * displacement_2
+                moved = True
+
+        if not moved:
+            return pass_index
+
+    return max_passes
+
+
+def _initialize_layout(
+        node_tree: bpy.types.NodeTree,
+        target_nodes: List[bpy.types.Node],
+        target_space: float,
+) -> None:
+    """Place connected nodes in left-to-right columns before relaxation."""
+    target_set = set(target_nodes)
+    ranks = {node: 0 for node in target_nodes}
+    max_rank = max(1, len(target_nodes))
+    for _ in range(max_rank):
+        changed = False
+        for link in node_tree.links:
+            source = link.from_node
+            destination = link.to_node
+            if source not in target_set or destination not in target_set:
+                continue
+            candidate = ranks[source] + 1
+            if candidate > ranks[destination]:
+                ranks[destination] = candidate
+                changed = True
+        if not changed:
+            break
+
+    columns = {}
+    for node in target_nodes:
+        columns.setdefault(ranks[node], []).append(node)
+    column_x = 0.0
+    for rank in sorted(columns):
+        column = columns[rank]
+        column_width = max(_get_node_size(node)[0] for node in column)
+        y = 0.0
+        for node in sorted(column, key=lambda item: item.name):
+            _, height = _get_node_size(node)
+            node.location = (column_x, -y)
+            y += height + target_space
+        column_x += column_width + target_space
 
 
 def _arrange_nodes_internal_routine(
@@ -113,10 +207,11 @@ def _arrange_nodes_internal_routine(
             k = 0.9
             margin = 0.5 * target_space
 
-            # Examine all node pairs
-            for node_1 in node_tree.nodes:
-                for node_2 in node_tree.nodes:
-                    if node_1 == node_2:
+            # Examine each node pair once.
+            nodes = list(node_tree.nodes)
+            for index, node_1 in enumerate(nodes):
+                for node_2 in nodes[index + 1:]:
+                    if node_1 not in target_nodes and node_2 not in target_nodes:
                         continue
 
                     x_1 = node_1.location[0]
@@ -130,8 +225,8 @@ def _arrange_nodes_internal_routine(
 
                     y_1 = node_1.location[1]
                     y_2 = node_2.location[1]
-                    h_1 = _get_height(node_1)
-                    h_2 = _get_height(node_2)
+                    _, h_1 = _get_node_size(node_1)
+                    _, h_2 = _get_node_size(node_2)
                     cy_1 = y_1 - 0.5 * h_1
                     cy_2 = y_2 - 0.5 * h_2
                     ry_1 = 0.5 * h_1 + margin
@@ -215,8 +310,7 @@ def arrange_nodes(node_tree: bpy.types.NodeTree,
             print("- " + node.name)
 
     if not use_current_layout_as_initial_guess:
-        for node in target_nodes:
-            node.location = (0.0, 0.0)
+        _initialize_layout(node_tree, target_nodes, target_space)
 
     time_0 = datetime.datetime.now()
 
@@ -244,8 +338,14 @@ def arrange_nodes(node_tree: bpy.types.NodeTree,
                                                      verbose=verbose,
                                                      is_second_stage=True)
 
+    # The iterative force pass can leave a small penetration when one node is
+    # fixed or when several overlaps are resolved in the same iteration.
+    # Finish with an exact pairwise pass so the returned layout has no overlap.
+    overlap_passes = _resolve_overlaps(node_tree, target_nodes, target_space, max_num_iters)
+
     time_2 = datetime.datetime.now()
 
     if verbose:
         print("Elapsed time (1st pass): {} (#iters = {})".format(time_1 - time_0, iter_count_1st))
         print("Elapsed time (2nd pass): {} (#iters = {})".format(time_2 - time_1, iter_count_2nd))
+        print("Overlap resolution passes: {}".format(overlap_passes))
