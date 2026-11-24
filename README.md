@@ -4,6 +4,10 @@
 
 A Blender add-on for automatic layout of nodes.
 
+This fork improves the layout pass for production node graphs. It places
+connected nodes from left to right, separates branches vertically, and runs a
+final exact overlap-resolution pass so node bodies do not cover one another.
+
 ## Example
 
 Before:
@@ -19,6 +23,22 @@ After:
 This repository can be used as a Blender add-on. It provides `Node Auto Layout` panel UI for the node editor.
 
 ![](./docs/panel.png)
+
+#### Installation
+
+1. Download or clone this repository.
+2. In Blender, open `Edit > Preferences > Add-ons`.
+3. Choose `Install...` and select the repository folder or a ZIP archive.
+4. Enable **Node Layout**.
+
+The add-on is available in the `Shader Editor`, `Compositor`, and `Texture
+Node Editor`. Open the sidebar with `N`, choose the `Layout` tab, and run
+`Arrange all nodes` or `Arrange selected nodes`.
+
+The default layout keeps linked nodes flowing from left to right. Nodes in the
+same connection column are spaced vertically, and the final pass enforces the
+configured `Target space` between node bounds. Existing positions can still be
+used as the initial guess with `Use current as initial`.
 
 ### As a Python Library
 
@@ -38,7 +58,14 @@ def arrange_nodes(node_tree: bpy.types.NodeTree,
 
 ## Blender Versions
 
-`2.80` or later. Tested on `2.80` and `2.81`.
+The original add-on supports Blender `2.80` or later. This improved fork has
+been verified with Blender `5.2.0 LTS`.
+
+## Verification
+
+The included test graph runs in background mode with Blender 5.2 and checks
+that the resulting node bounds do not overlap. The layout module can also be
+used directly from Python as shown above.
 
 ## TODOs
 
