@@ -102,6 +102,8 @@ class NODELAYOUT_PT_NodeLayoutPanel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
+        layout.label(text="Node Auto Layout v{}.{}".format(*bl_info["version"]), icon='INFO')
+        layout.separator()
         layout.label(text="Parameters:")
         layout.prop(scene, "nodelayout_prop_int", text="#iterations")
         layout.prop(scene, "nodelayout_prop_float", text="Target space")
