@@ -93,7 +93,7 @@ def _initialize_layout(
         target_nodes: List[bpy.types.Node],
         target_space: float,
 ) -> None:
-    """Place connected nodes in left-to-right columns before relaxation."""
+    """Place connected nodes in semantic left-to-right branch lanes."""
     target_set = set(target_nodes)
     ranks = {node: 0 for node in target_nodes}
     max_rank = max(1, len(target_nodes))
@@ -111,18 +111,70 @@ def _initialize_layout(
         if not changed:
             break
 
+    # The highest fan-in node is normally the material shader. Its linked
+    # input order provides the most useful visual ordering for branches.
+    fan_in_nodes = []
+    for node in target_nodes:
+        linked_inputs = [index for index, socket in enumerate(node.inputs) if socket.is_linked]
+        if len(linked_inputs) >= 2:
+            fan_in_nodes.append((ranks[node], node, linked_inputs))
+
+    lanes = {}
+    if fan_in_nodes:
+        highest_rank = max(item[0] for item in fan_in_nodes)
+        hubs = [item for item in fan_in_nodes if item[0] == highest_rank]
+        for _, hub, linked_inputs in hubs:
+            input_lane = {index: lane for lane, index in enumerate(sorted(linked_inputs))}
+            incoming_lanes = []
+            for link in node_tree.links:
+                if link.to_node != hub or link.from_node not in target_set:
+                    continue
+                socket_index = next(index for index, socket in enumerate(hub.inputs) if socket == link.to_socket)
+                lane = float(input_lane[socket_index])
+                incoming_lanes.append(lane)
+                previous = lanes.get(link.from_node)
+                lanes[link.from_node] = lane if previous is None else (previous + lane) * 0.5
+            if incoming_lanes:
+                lanes[hub] = sum(incoming_lanes) / len(incoming_lanes)
+
+    # Propagate branch lanes upstream and downstream. Averaging is intentional
+    # for shared nodes such as a UV Map feeding both color and normal branches.
+    for _ in range(max_rank + 1):
+        changed = False
+        for node in sorted(target_nodes, key=lambda item: ranks[item], reverse=True):
+            values = []
+            for link in node_tree.links:
+                if link.from_node == node and link.to_node in lanes:
+                    values.append(lanes[link.to_node])
+                elif link.to_node == node and link.from_node in lanes:
+                    values.append(lanes[link.from_node])
+            if not values:
+                continue
+            lane = sum(values) / len(values)
+            if node not in lanes or abs(lanes[node] - lane) > 1e-05:
+                lanes[node] = lane
+                changed = True
+        if not changed:
+            break
+
+    default_lane = sum(lanes.values()) / len(lanes) if lanes else 0.0
+    for node in target_nodes:
+        lanes.setdefault(node, default_lane)
+
     columns = {}
     for node in target_nodes:
         columns.setdefault(ranks[node], []).append(node)
+
+    max_height = max(_get_node_size(node)[1] for node in target_nodes)
+    lane_spacing = max_height + max(0.0, target_space)
     column_x = 0.0
     for rank in sorted(columns):
         column = columns[rank]
         column_width = max(_get_node_size(node)[0] for node in column)
-        y = 0.0
         for node in sorted(column, key=lambda item: item.name):
             _, height = _get_node_size(node)
-            node.location = (column_x, -y)
-            y += height + target_space
+            lane_y = -lanes[node] * lane_spacing
+            node.location = (column_x, lane_y + height * 0.5)
         column_x += column_width + target_space
 
 
