@@ -2,7 +2,8 @@ import bpy
 import sys
 import math
 import datetime
-from typing import List, Optional
+from collections import defaultdict, deque
+from typing import List, Optional, Tuple
 
 
 def _get_from_socket_index(node: bpy.types.Node, node_socket: bpy.types.NodeSocket) -> int:
@@ -19,7 +20,7 @@ def _get_to_socket_index(node: bpy.types.Node, node_socket: bpy.types.NodeSocket
     assert False
 
 
-def _get_node_size(node: bpy.types.Node) -> tuple[float, float]:
+def _get_node_size(node: bpy.types.Node) -> Tuple[float, float]:
     """Return node size, including when dimensions are unavailable."""
     epsilon = 1e-05
     width = node.dimensions.x if node.dimensions.x > epsilon else node.width
@@ -176,6 +177,204 @@ def _initialize_layout(
             lane_y = -lanes[node] * lane_spacing
             node.location = (column_x, lane_y + height * 0.5)
         column_x += column_width + target_space
+
+
+def _shader_layout(node_tree, nodes, target_space):
+    """Return a layered layout for a flat material graph with one shader hub."""
+    if node_tree.bl_idname != 'ShaderNodeTree' or any(
+            node.parent or node.hide or node.type in {'FRAME', 'REROUTE'} for node in nodes):
+        return None
+
+    outputs = [node for node in nodes if node.type == 'OUTPUT_MATERIAL' and node.is_active_output]
+    if len(outputs) != 1:
+        return None
+    output = outputs[0]
+    incoming = defaultdict(list)
+    outgoing = defaultdict(list)
+    for link in node_tree.links:
+        if link.is_valid and not getattr(link, 'is_muted', False):
+            incoming[link.to_node].append(link)
+            outgoing[link.from_node].append(link)
+
+    if len(incoming[output]) != 1 or incoming[output][0].to_socket.identifier != 'Surface':
+        return None
+    hub = incoming[output][0].from_node
+    branches = {}
+    for link in sorted(incoming[hub], key=lambda link: _get_to_socket_index(hub, link.to_socket)):
+        if link.from_node not in branches:
+            branches[link.from_node] = len(branches)
+    if len(branches) < 2:
+        return None
+
+    pending = {node: len(incoming[node]) for node in nodes}
+    queue = deque(node for node in nodes if not pending[node])
+    rank = dict.fromkeys(nodes, 0)
+    ordered = []
+    while queue:
+        node = queue.popleft()
+        ordered.append(node)
+        for link in outgoing[node]:
+            child = link.to_node
+            rank[child] = max(rank[child], rank[node] + 1)
+            pending[child] -= 1
+            if not pending[child]:
+                queue.append(child)
+    if len(ordered) != len(nodes) or ordered[-2:] != [hub, output]:
+        return None
+
+    lanes = {node: {lane} for node, lane in branches.items()}
+    for node in reversed(ordered[:-2]):
+        lane_set = lanes.setdefault(node, set())
+        for link in outgoing[node]:
+            lane_set.update(lanes.get(link.to_node, ()))
+        if not lane_set:
+            return None
+    sizes = {node: _get_node_size(node) for node in nodes}
+    gap = max(1.0, target_space)
+    columns = defaultdict(list)
+    rows = defaultdict(list)
+    for node in ordered:
+        # A shared coordinate source sits left of the branch-local sources.
+        column = 2 * rank[node]
+        if rank[node] == 0 and len(lanes[node]) > 1:
+            column -= 1
+        columns[column].append(node)
+        if node in lanes and len(lanes[node]) == 1:
+            rows[min(lanes[node]), column].append(node)
+
+    x_positions = {}
+    x = 0.0
+    for column in sorted(columns):
+        for node in columns[column]:
+            x_positions[node] = x
+        x += max(sizes[node][0] for node in columns[column]) + 2.5 * gap
+
+    y_positions = {}
+    lane_tops = []
+    y = 0.0
+    for lane in range(len(branches)):
+        lane_tops.append(y)
+        lane_bottom = y
+        for column in columns:
+            next_y = y
+            for node in rows.get((lane, column), ()):
+                y_positions[node] = next_y
+                next_y -= sizes[node][1] + gap
+            lane_bottom = min(lane_bottom, next_y)
+        y = lane_bottom
+
+    # Fit shared nodes and coordinate sources around their consumers. Move
+    # only vertically to clear previously placed nodes in the same column.
+    y_positions[hub] = y_positions[output] = lane_tops[len(lane_tops) // 2]
+    for column in sorted(columns, reverse=True):
+        placed = [node for node in columns[column]
+                  if node in y_positions and (incoming[node] or node in branches)]
+        for node in columns[column]:
+            if node in placed:
+                continue
+            consumers = list(dict.fromkeys(link.to_node for link in outgoing[node]))
+            if len(consumers) == 1 and not incoming[node]:
+                consumer = consumers[0]
+                y = y_positions[consumer] - max(0.0, sizes[consumer][1] - sizes[node][1])
+            else:
+                centers = [y_positions[child] - sizes[child][1] / 2 for child in consumers]
+                y = (min(centers) + max(centers)) / 2 + sizes[node][1] / 2
+            for other in sorted(placed, key=y_positions.get, reverse=True):
+                other_top = y_positions[other]
+                other_bottom = other_top - sizes[other][1]
+                if y > other_bottom - gap and y - sizes[node][1] < other_top + gap:
+                    y = other_bottom - gap
+            y_positions[node] = y
+            placed.append(node)
+
+    x_offset = hub.location.x - x_positions[hub]
+    y_offset = hub.location.y - y_positions[hub]
+    return {node: (x_positions[node] + x_offset, y_positions[node] + y_offset) for node in nodes}
+
+
+def _generic_layout(node_tree, nodes, target_space):
+    """Arrange any flat node graph from sources on the left to sinks on the right."""
+    if any(node.parent for node in nodes):
+        return None
+
+    active_links = [
+        link for link in node_tree.links
+        if link.from_node in nodes and link.to_node in nodes
+        and link.is_valid and not getattr(link, 'is_muted', False)
+    ]
+    incoming = defaultdict(list)
+    outgoing = defaultdict(list)
+    for link in active_links:
+        incoming[link.to_node].append(link.from_node)
+        outgoing[link.from_node].append(link.to_node)
+
+    indegree = {node: len(incoming[node]) for node in nodes}
+    rank = dict.fromkeys(nodes, 0)
+    queue = deque(sorted((node for node in nodes if indegree[node] == 0), key=lambda node: node.name))
+    ordered = []
+    while queue:
+        node = queue.popleft()
+        ordered.append(node)
+        for child in sorted(outgoing[node], key=lambda item: item.name):
+            rank[child] = max(rank[child], rank[node] + 1)
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
+
+    # A cycle has no meaningful source rank. Keep it in a stable fallback
+    # column while still laying out the acyclic portion of the graph.
+    remaining = [node for node in nodes if node not in ordered]
+    if remaining:
+        cycle_rank = max((rank[node] for node in ordered), default=0) + 1
+        for node in sorted(remaining, key=lambda item: item.name):
+            rank[node] = cycle_rank
+            ordered.append(node)
+
+    sizes = {node: _get_node_size(node) for node in nodes}
+    gap = max(1.0, target_space)
+    columns = defaultdict(list)
+    for node in ordered:
+        columns[rank[node]].append(node)
+
+    # A barycenter sort keeps each column close to the vertical order of its
+    # connected predecessors, which makes the resulting links easier to read.
+    y_positions = {}
+    for column in sorted(columns):
+        column_nodes = columns[column]
+        if column == 0:
+            column_nodes.sort(key=lambda node: node.name)
+        else:
+            column_nodes.sort(key=lambda node: (
+                sum(y_positions[source] - sizes[source][1] * 0.5 for source in incoming[node])
+                / len(incoming[node]) if incoming[node] else float('inf'),
+                node.name,
+            ))
+        y = 0.0
+        for node in column_nodes:
+            y_positions[node] = y
+            y -= sizes[node][1] + gap
+
+    x_positions = {}
+    x = 0.0
+    for column in sorted(columns):
+        for node in columns[column]:
+            x_positions[node] = x
+        x += max(sizes[node][0] for node in columns[column]) + 2.5 * gap
+
+    min_x = min(x_positions.values())
+    max_x = max(x_positions[node] + sizes[node][0] for node in nodes)
+    min_y = min(y_positions[node] - sizes[node][1] for node in nodes)
+    max_y = max(y_positions.values())
+    old_min_x = min(node.location.x for node in nodes)
+    old_max_x = max(node.location.x + sizes[node][0] for node in nodes)
+    old_min_y = min(node.location.y - sizes[node][1] for node in nodes)
+    old_max_y = max(node.location.y for node in nodes)
+    offset_x = (old_min_x + old_max_x - min_x - max_x) * 0.5
+    offset_y = (old_min_y + old_max_y - min_y - max_y) * 0.5
+    return {
+        node: (x_positions[node] + offset_x, y_positions[node] + offset_y)
+        for node in nodes
+    }
 
 
 def _arrange_nodes_internal_routine(
@@ -350,10 +549,21 @@ def arrange_nodes(node_tree: bpy.types.NodeTree,
         A list of target nodes whose positions will be automatically modified. When this list is not speficied, this function will handle all the nodes in the node tree as targets.
     """
 
-    if target_nodes is None:
-        target_nodes = []
-        for node in node_tree.nodes:
-            target_nodes.append(node)
+    nodes = list(node_tree.nodes)
+    target_nodes = nodes if target_nodes is None else list(target_nodes)
+    if not target_nodes:
+        return
+
+    if (not use_current_layout_as_initial_guess and max_num_iters > 0
+            and fix_horizontal_location and fix_vertical_location and fix_overlaps
+            and set(target_nodes) == set(nodes)):
+        positions = _shader_layout(node_tree, nodes, target_space)
+        if positions is None:
+            positions = _generic_layout(node_tree, nodes, target_space)
+        if positions is not None:
+            for node, location in positions.items():
+                node.location = location
+            return
 
     if verbose:
         print("-----------------")
@@ -393,7 +603,9 @@ def arrange_nodes(node_tree: bpy.types.NodeTree,
     # The iterative force pass can leave a small penetration when one node is
     # fixed or when several overlaps are resolved in the same iteration.
     # Finish with an exact pairwise pass so the returned layout has no overlap.
-    overlap_passes = _resolve_overlaps(node_tree, target_nodes, target_space, max_num_iters)
+    overlap_passes = 0
+    if fix_overlaps:
+        overlap_passes = _resolve_overlaps(node_tree, target_nodes, target_space, max_num_iters)
 
     time_2 = datetime.datetime.now()
 

@@ -4,9 +4,10 @@
 
 A Blender add-on for automatic layout of nodes.
 
-This fork improves the layout pass for production node graphs. It places
-connected nodes from left to right, separates branches vertically, and runs a
-final exact overlap-resolution pass so node bodies do not cover one another.
+This fork improves the layout pass for production node graphs. It arranges
+flat node graphs of any Blender node-tree type from left to right, separates
+branches vertically, and runs a final exact overlap-resolution pass so node
+bodies do not cover one another.
 
 ## Example
 
@@ -35,10 +36,12 @@ The add-on is available in the `Shader Editor`, `Compositor`, and `Texture
 Node Editor`. Open the sidebar with `N`, choose the `Layout` tab, and run
 `Arrange all nodes` or `Arrange selected nodes`.
 
-The default layout keeps linked nodes flowing from left to right. Nodes in the
-same connection column are spaced vertically, and the final pass enforces the
-configured `Target space` between node bounds. Existing positions can still be
-used as the initial guess with `Use current as initial`.
+The default layout keeps linked nodes flowing from left to right for Shader,
+Compositor, Geometry, Texture, and custom node trees. Nodes are placed in
+topological columns, branches are ordered by their connected neighbors, and
+independent nodes are placed in stable source columns. The final pass enforces
+the configured `Target space` between node bounds. Existing positions can still
+be used as the initial guess with `Use current as initial`.
 
 ### As a Python Library
 

@@ -5,16 +5,12 @@ from bpy.props import (
     IntProperty,
 )
 
-# Import the main function in the way that works for both add-on and library usages
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from arrange_nodes import arrange_nodes
+from .arrange_nodes import arrange_nodes
 
 bl_info = {
     "name": "Node Layout",
     "author": "Yuki Koyama",
-    "version": (0, 3),
+    "version": (0, 4, 0),
     "blender": (2, 80, 0),
     "location": "Shader Editor, Compositor, Texture Node Editor > Node",
     "description": "Automatic layout of node trees",
@@ -102,7 +98,8 @@ class NODELAYOUT_PT_NodeLayoutPanel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        layout.label(text="Node Auto Layout v{}.{}".format(*bl_info["version"]), icon='INFO')
+        version = ".".join(str(part) for part in bl_info["version"])
+        layout.label(text=f"Node Auto Layout v{version}", icon='INFO')
         layout.separator()
         layout.label(text="Parameters:")
         layout.prop(scene, "nodelayout_prop_int", text="#iterations")
